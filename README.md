@@ -10,7 +10,7 @@ Runs on plain Python 3.10+ (`python3 p2p.py connect`), or with no clone via
 
 **Both machines run the same command and enter the SAME passphrase:**
 ```
-uvx --from git+https://github.com/<you>/<repo> connect
+uvx --from git+https://github.com/debugwatch/p2p-udp-secure connect
 ```
 or just:
 ```
