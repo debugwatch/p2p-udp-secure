@@ -1,0 +1,18 @@
+[project]
+name = "p2p-udp-secure"
+version = "0.1.0"
+description = "Zero-dependency P2P UDP chat with NAT hole punching and passphrase encryption."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+# Run with no filename: uvx --from git+<url> connect
+[project.scripts]
+connect = "p2p:connect_cmd"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["p2p.py"]
