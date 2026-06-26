@@ -25,6 +25,19 @@ python3 p2p.py connect
 If the passphrases don't match, messages simply fail their integrity check and
 are silently dropped (you'll see no `<` lines).
 
+## Run straight from the URL (no clone)
+
+`uv run` executes the single file directly from its raw URL:
+```
+uv run https://raw.githubusercontent.com/debugwatch/p2p-udp-secure/main/p2p.py connect
+```
+No `uv`? This file is pure stdlib, so pipe it into Python — process substitution
+keeps stdin free for pasting the token (a plain `curl | python3` would not):
+```
+python3 <(curl -sL https://raw.githubusercontent.com/debugwatch/p2p-udp-secure/main/p2p.py) connect
+```
+`main` serves the latest commit; put a commit SHA in place of `main` to pin a version.
+
 ## Encryption
 
 Encrypt-then-MAC using only the standard library:
