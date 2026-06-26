@@ -13,7 +13,8 @@ Both machines run the same command and enter the SAME passphrase:
 
 Each prints a short token (your public ip:port, via STUN). Swap tokens, paste
 the other machine's, and you're connected. Messages are encrypted with a key
-derived from the shared passphrase.
+derived from the shared passphrase. Progress logs go to stderr (P2P_QUIET=1
+silences them).
 
 Crypto note: this is encrypt-then-MAC using only the standard library
 (scrypt key derivation, an HMAC-SHA256 keystream, HMAC-SHA256 authentication
@@ -37,6 +38,14 @@ import time
 STUN_HOST, STUN_PORT = "stun.l.google.com", 19302
 STUN_MAGIC = 0x2112A442
 CTRL, DATA = b"\x00", b"\x01"  # packet type prefixes
+
+_T0 = time.monotonic()
+_QUIET = os.environ.get("P2P_QUIET")
+
+
+def log(*parts):
+    if not _QUIET:
+        print(f"[{time.monotonic() - _T0:6.2f}s] [p2p]", *parts, file=sys.stderr, flush=True)
 
 
 # --- authenticated encryption (stdlib only) -------------------------------
@@ -82,13 +91,16 @@ def stun_request(sock):
     """Send a STUN Binding Request; return (public_ip, public_port)."""
     txid = os.urandom(12)
     req = struct.pack(">HHI12s", 0x0001, 0, STUN_MAGIC, txid)
-    addr = (socket.gethostbyname(STUN_HOST), STUN_PORT)
+    ip = socket.gethostbyname(STUN_HOST)
+    log(f"STUN: querying {STUN_HOST} ({ip}:{STUN_PORT}) for our public address")
+    addr = (ip, STUN_PORT)
     sock.settimeout(1.0)
-    for _ in range(5):
+    for attempt in range(1, 6):
         sock.sendto(req, addr)
         try:
             data, _ = sock.recvfrom(2048)
         except socket.timeout:
+            log(f"STUN: no reply (attempt {attempt}/5), retrying")
             continue
         got = _parse_stun(data, txid)
         if got:
@@ -136,26 +148,11 @@ def setup_socket():
     if override:  # LAN / test: skip STUN, advertise+bind this address
         host, port = override.rsplit(":", 1)
         sock.bind((host, int(port)))
+        log(f"LAN mode: bound and advertising {host}:{port} (STUN skipped)")
         return sock, (host, int(port))
     sock.bind(("", 0))
+    log(f"bound local UDP socket on port {sock.getsockname()[1]}")
     return sock, stun_request(sock)
-
-
-def hole_punch(sock, peer, timeout=30):
-    """Spray packets at the peer until one comes back, opening the NAT path."""
-    sock.settimeout(0.5)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            sock.sendto(CTRL + b"syn", peer)
-        except OSError:
-            pass
-        try:
-            sock.recvfrom(2048)
-            return  # heard from the peer -> path is open
-        except socket.timeout:
-            continue
-    raise RuntimeError("could not reach peer (symmetric NAT/firewall? would need a relay)")
 
 
 def read_token(prompt):
@@ -164,51 +161,76 @@ def read_token(prompt):
     return None if line == "" else line.strip()
 
 
-def chat(sock, peer, key):
-    print("[connected] type a message and press Enter to send\n", flush=True)
+def run_session(sock, peer, key, timeout=30):
+    """Hole punch and chat. Probe every 0.5s until a packet arrives (path open),
+    then drop to a 15s keepalive. Control packets (probe/keepalive) are plaintext;
+    chat payloads are sealed with the passphrase-derived key."""
     stop = threading.Event()
+    connected = threading.Event()
 
-    def receiver():
-        sock.settimeout(1.0)
+    def sender():
+        log(f"hole punching: probing {peer[0]}:{peer[1]} every 0.5s until connected")
         while not stop.is_set():
-            try:
-                pkt, _ = sock.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            if pkt[:1] == DATA:
-                msg = unseal(key, pkt[1:])
-                if msg is None:
-                    continue  # wrong passphrase or tampered -> drop
-                sys.stdout.write("< " + msg.decode("utf-8", "replace") + "\n")
-                sys.stdout.flush()
-
-    def keepalive():  # keep the NAT mapping alive
-        while not stop.wait(15):
             try:
                 sock.sendto(CTRL + b"ka", peer)
             except OSError:
                 break
+            if connected.is_set():
+                log("send: keepalive -> peer")
+            stop.wait(0.5 if not connected.is_set() else 15)
 
+    def receiver():
+        sock.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                pkt, addr = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not connected.is_set():
+                log(f"got first packet from {addr[0]}:{addr[1]} -> path open")
+                connected.set()
+            if pkt[:1] == DATA:
+                msg = unseal(key, pkt[1:])
+                if msg is None:
+                    log("recv: DROPPED packet (bad MAC -> wrong passphrase or tampered)")
+                    continue
+                log(f"recv: {len(pkt) - 1} encrypted bytes -> {len(msg)} bytes decrypted (MAC ok)")
+                sys.stdout.write("< " + msg.decode("utf-8", "replace") + "\n")
+                sys.stdout.flush()
+            else:
+                log("recv: keepalive/probe from peer")
+
+    threading.Thread(target=sender, daemon=True).start()
     threading.Thread(target=receiver, daemon=True).start()
-    threading.Thread(target=keepalive, daemon=True).start()
+
+    if not connected.wait(timeout):
+        stop.set()
+        raise RuntimeError("could not reach peer (symmetric NAT/firewall? would need a relay)")
+    print("[connected] type a message and press Enter to send\n", flush=True)
     try:
         for line in sys.stdin:
-            sock.sendto(DATA + seal(key, line.rstrip("\n").encode()), peer)
+            payload = seal(key, line.rstrip("\n").encode())
+            sock.sendto(DATA + payload, peer)
+            log(f"send: encrypted {len(payload)} bytes -> peer")
     finally:
         stop.set()
 
 
 def connect():
+    log("starting (mode: encrypted UDP hole punch)")
     # Prompt interactively; P2P_PASS allows non-interactive/scripted use.
     passphrase = os.environ.get("P2P_PASS") or getpass.getpass(
         "Shared passphrase (must match on both machines): ")
     if not passphrase:
         sys.exit("A passphrase is required.")
+    log("deriving key from passphrase (scrypt n=2^14)...")
     key = derive_key(passphrase)
+    log("key ready")
 
     sock, (ip, port) = setup_socket()
+    log(f"our endpoint is {ip}:{port}")
     token = enc_token(ip, port)
     print("\n----- TOKEN (send this to the other machine) -----", flush=True)
     print(token, flush=True)
@@ -217,8 +239,8 @@ def connect():
     if not blob:
         sys.exit("No token given.")
     peer = dec_token(blob)
-    hole_punch(sock, peer)
-    chat(sock, peer, key)
+    log(f"peer endpoint decoded: {peer[0]}:{peer[1]}")
+    run_session(sock, peer, key)
 
 
 def connect_cmd():

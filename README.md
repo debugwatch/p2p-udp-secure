@@ -45,6 +45,13 @@ P2P_ADDR=127.0.0.1:9001 python3 p2p.py connect   # peer A
 P2P_ADDR=127.0.0.1:9002 python3 p2p.py connect   # peer B
 ```
 
+## Logs
+
+Progress logs (STUN, endpoints, hole-punch probes, encrypt/decrypt with MAC
+results) print to **stderr**; set `P2P_QUIET=1` to silence them. A wrong
+passphrase shows up as `DROPPED packet (bad MAC ...)` lines. Logs never touch
+the token or chat on stdout.
+
 ## NAT note
 
 Hole punching works through common cone NATs. If **both** peers are behind
